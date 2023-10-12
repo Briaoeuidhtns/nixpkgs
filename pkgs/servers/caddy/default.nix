@@ -1,21 +1,21 @@
-{ lib
-, buildGoModule
-, fetchFromGitHub
-, nixosTests
-, caddy
-, testers
-, installShellFiles
-}:
+{ lib, buildGo122Module, fetchFromGitHub, gnused, nixosTests, caddy, testers
+, installShellFiles, externalPlugins ? [ ]
+, vendorHash ? "sha256-YNcQtjPGQ0XMSog+sWlH4lG/QdbdI0Lyh/fUGqQUFaY=", }:
+
 let
+  attrsToModules = attrs:
+    builtins.map ({ name, repo, version, }: "${repo}") attrs;
+  attrsToSources = attrs:
+    builtins.map ({ name, repo, version, }: "${repo}@${version}") attrs;
   version = "2.7.6";
+
   dist = fetchFromGitHub {
     owner = "caddyserver";
     repo = "dist";
     rev = "v${version}";
     hash = "sha256-aZ7hdAZJH1PvrX9GQLzLquzzZG3LZSKOvt7sWQhTiR8=";
   };
-in
-buildGoModule {
+in buildGo122Module rec {
   pname = "caddy";
   inherit version;
 
@@ -26,16 +26,41 @@ buildGoModule {
     hash = "sha256-th0R3Q1nGT0q5PGOygtD1/CpJmrT5TYagrwQR4t/Fvg=";
   };
 
-  vendorHash = "sha256-ebnSehuhbCY58ctM8IRVMfNxxbJBp6ht9cbuLdGFNek=";
+  inherit vendorHash;
 
   subPackages = [ "cmd/caddy" ];
 
-  ldflags = [
-    "-s" "-w"
-    "-X github.com/caddyserver/caddy/v2.CustomVersion=${version}"
-  ];
+  ldflags =
+    [ "-s" "-w" "-X github.com/caddyserver/caddy/v2.CustomVersion=${version}" ];
 
-  nativeBuildInputs = [ installShellFiles ];
+  nativeBuildInputs = [ gnused installShellFiles ];
+
+  modBuildPhase = ''
+    for module in ${builtins.toString (attrsToModules externalPlugins)}; do
+      sed -i "/standard/a _ \"$module\"" ./cmd/caddy/main.go
+    done
+    for plugin in ${builtins.toString (attrsToSources externalPlugins)}; do
+      go get $plugin
+    done
+
+    go generate
+    go mod vendor
+  '';
+
+  modInstallPhase = ''
+    mv -t vendor go.mod go.sum
+    cp -r --reflink=auto vendor "$out"
+  '';
+
+  preBuild = ''
+    chmod -R u+w vendor
+    [ -f vendor/go.mod ] && mv -t . vendor/go.{mod,sum}
+    go generate
+
+    for module in ${builtins.toString (attrsToModules externalPlugins)}; do
+      sed -i "/standard/a _ \"$module\"" ./cmd/caddy/main.go
+    done
+  '';
 
   postInstall = ''
     install -Dm644 ${dist}/init/caddy.service ${dist}/init/caddy-api.service -t $out/lib/systemd/system
@@ -62,7 +87,8 @@ buildGoModule {
 
   meta = with lib; {
     homepage = "https://caddyserver.com";
-    description = "Fast and extensible multi-platform HTTP/1-2-3 web server with automatic HTTPS";
+    description =
+      "Fast and extensible multi-platform HTTP/1-2-3 web server with automatic HTTPS";
     license = licenses.asl20;
     mainProgram = "caddy";
     maintainers = with maintainers; [ Br1ght0ne emilylange techknowlogick ];
